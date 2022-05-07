@@ -1,0 +1,28 @@
+from django.urls import path
+
+from backend.views import PartnerUpdate, ProductInfoView, RegisterView, LoginView, ConfirmView, \
+    BasketView, ResetPasswordRequestTokenView, ResetPasswordView, OrderConfirmView, ContactsView, OrdersView, \
+    PartnerState, PartnerOrders, AccountData, CategoryView, ShopView
+
+
+app_name = 'app'
+
+
+urlpatterns = [
+    path('partner/update', PartnerUpdate.as_view(), name='partner-update'),
+    path('partner/state', PartnerState.as_view(), name='partner-state'),
+    path('partner/orders', PartnerOrders.as_view(), name='partner-orders'),
+    path('products', ProductInfoView.as_view(), name='products'),
+    path('register', RegisterView.as_view(), name='register'),
+    path('login', LoginView.as_view(), name='login'),
+    path('accountconfirm', ConfirmView.as_view(), name='confirm'),
+    path('basket', BasketView.as_view(), name='basket'),
+    path('resetpasswordtoken', ResetPasswordRequestTokenView.as_view(), name='reset-password-token'),
+    path('resetpassword', ResetPasswordView.as_view(), name='reset-password'),
+    path('orderconfirm', OrderConfirmView.as_view(), name='order-confirm'),
+    path('contacts', ContactsView.as_view(), name='contacts'),
+    path('orders', OrdersView.as_view(), name='orders'),
+    path('account/data', AccountData.as_view(), name='account-data'),
+    path('category', CategoryView.as_view(), name='category'),
+    path('shop', ShopView.as_view(), name='shop')
+]
