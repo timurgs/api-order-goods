@@ -1,15 +1,19 @@
 import random
 
+from celery import shared_task
 from django.contrib.auth import authenticate
 from django.db import IntegrityError
+from django.views.generic import TemplateView
+from drf_spectacular.utils import extend_schema, OpenApiParameter
 from requests import get
+from rest_framework import viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.generics import ListAPIView
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from yaml import load as load_yaml, Loader
 from ujson import loads as load_json
 import re
-from django_rest_passwordreset.signals import reset_password_token_created
 
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
@@ -21,12 +25,16 @@ from django.db.models import Q, Sum, F
 from backend.models import Shop, Category, ProductInfo, Product, Parameter, ProductParameter, Order, OrderItem, \
     ConfirmEmailToken, User, ResetPasswordToken, Contact
 from backend.serializers import ProductInfoSerializer, OrderSerializer, OrderItemSerializer, UserSerializer, \
-    ContactSerializer, CategorySerializer, ShopSerializer
-from backend.signals import new_user_registered, new_order_user, new_order_admin
+    ContactSerializer, CategorySerializer, ShopSerializer, RegisterRequestSerializer, ConfirmRequestSerializer, \
+    LoginRequestSerializer, ResetPasswordTokenRequestSerializer, ResetPasswordRequestSerializer, \
+    PartnerUpdateRequestSerializer, PartnerStateRequestSerializer, BasketRequestSerializer, \
+    OrderConfirmRequestSerializer, ContactsCreateRequestSerializer, ContactsRemoveRequestSerializer
+from backend.emails import new_user_registered, new_order_user, new_order_admin, password_reset_token_created
 
 
 class RegisterView(APIView):
 
+    @extend_schema(request=RegisterRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         if {'last_name', 'first_name', 'email', 'password', 'company', 'position'}.issubset(request.data):
             # проверка пароля на сложность
@@ -38,7 +46,7 @@ class RegisterView(APIView):
                     user = user_serializer.save()
                     user.set_password(request.data['password'])
                     user.save()
-                    new_user_registered.send(sender=self.__class__, user_id=user.id)
+                    new_user_registered.delay(user_id=user.id)
                     return JsonResponse({'Status': True})
                 else:
                     return JsonResponse({'Status': False, 'Errors': user_serializer.errors})
@@ -50,6 +58,7 @@ class RegisterView(APIView):
 
 class ConfirmView(APIView):
 
+    @extend_schema(request=ConfirmRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         # проверяем обязательные аргументы
         if {'email', 'token'}.issubset(request.data):
@@ -67,6 +76,7 @@ class ConfirmView(APIView):
 
 class LoginView(APIView):
 
+    @extend_schema(request=LoginRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         if {'email', 'password'}.issubset(request.data):
             user = authenticate(request, username=request.data['email'], password=request.data['password'])
@@ -82,12 +92,12 @@ class LoginView(APIView):
 
 class ResetPasswordRequestTokenView(APIView):
 
+    @extend_schema(request=ResetPasswordTokenRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         if {'email'}.issubset(request.data):
             user = User.objects.filter(email=request.data['email']).first()
             if user:
-                token, _ = ResetPasswordToken.objects.get_or_create(user_id=user.id)
-                reset_password_token_created.send(sender=self.__class__, instance=self, reset_password_token=token)
+                password_reset_token_created.delay(user_id=user.id)
                 return JsonResponse({'Status': True})
             else:
                 return JsonResponse({'Status': False, 'Errors': 'Данный email не найден'})
@@ -97,6 +107,7 @@ class ResetPasswordRequestTokenView(APIView):
 
 class ResetPasswordView(APIView):
 
+    @extend_schema(request=ResetPasswordRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         if {'email', 'token', 'new_password'}.issubset(request.data):
             token = ResetPasswordToken.objects.filter(user__email=request.data['email'],
@@ -124,6 +135,7 @@ class AccountData(APIView):
     Класс для работы с данными пользователя
     """
 
+    @extend_schema(request=None, responses=UserSerializer)
     def get(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'})
@@ -131,6 +143,7 @@ class AccountData(APIView):
         serializer = UserSerializer(request.user)
         return Response(serializer.data)
 
+    @extend_schema(request=UserSerializer, responses=None)
     def put(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'})
@@ -156,11 +169,47 @@ class AccountData(APIView):
             return JsonResponse({'Status': False, 'Errors': user_serializer.errors})
 
 
+@shared_task
+def partner_update_task(url_param, user_id):
+    validate_url = URLValidator()
+    try:
+        validate_url(url_param)
+    except ValidationError as e:
+        return JsonResponse({'Status': False, 'Error': str(e)})
+    else:
+        stream = get(url_param).content
+
+        data = load_yaml(stream, Loader=Loader)
+
+        shop, _ = Shop.objects.get_or_create(name=data['shop'], user_id=user_id)
+        for category in data['categories']:
+            category_object, _ = Category.objects.get_or_create(id=category['id'], name=category['name'])
+            category_object.shops.add(shop.id)
+            category_object.save()
+        ProductInfo.objects.filter(shop_id=shop.id).delete()
+        for item in data['goods']:
+            product, _ = Product.objects.get_or_create(name=item['name'], category_id=item['category'])
+
+            product_info = ProductInfo.objects.create(product_id=product.id,
+                                                      external_id=item['id'],
+                                                      model=item['model'],
+                                                      price=item['price'],
+                                                      price_rrc=item['price_rrc'],
+                                                      quantity=item['quantity'],
+                                                      shop_id=shop.id)
+            for name, value in item['parameters'].items():
+                parameter_object, _ = Parameter.objects.get_or_create(name=name)
+                ProductParameter.objects.create(product_info_id=product_info.id,
+                                                parameter_id=parameter_object.id,
+                                                value=value)
+
+
 class PartnerUpdate(APIView):
     """
     Класс для обновления прайса от поставщика
     """
 
+    @extend_schema(request=PartnerUpdateRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -170,45 +219,17 @@ class PartnerUpdate(APIView):
 
         url = request.data.get('url')
         if url:
-            validate_url = URLValidator()
-            try:
-                validate_url(url)
-            except ValidationError as e:
-                return JsonResponse({'Status': False, 'Error': str(e)})
-            else:
-                stream = get(url).content
+            user_id = request.user.id
+            partner_update_task.delay(url, user_id)
 
-                data = load_yaml(stream, Loader=Loader)
-
-                shop, _ = Shop.objects.get_or_create(name=data['shop'], user_id=request.user.id)
-                for category in data['categories']:
-                    category_object, _ = Category.objects.get_or_create(id=category['id'], name=category['name'])
-                    category_object.shops.add(shop.id)
-                    category_object.save()
-                ProductInfo.objects.filter(shop_id=shop.id).delete()
-                for item in data['goods']:
-                    product, _ = Product.objects.get_or_create(name=item['name'], category_id=item['category'])
-
-                    product_info = ProductInfo.objects.create(product_id=product.id,
-                                                              external_id=item['id'],
-                                                              model=item['model'],
-                                                              price=item['price'],
-                                                              price_rrc=item['price_rrc'],
-                                                              quantity=item['quantity'],
-                                                              shop_id=shop.id)
-                    for name, value in item['parameters'].items():
-                        parameter_object, _ = Parameter.objects.get_or_create(name=name)
-                        ProductParameter.objects.create(product_info_id=product_info.id,
-                                                        parameter_id=parameter_object.id,
-                                                        value=value)
-
-                return JsonResponse({'Status': True})
+            return JsonResponse({'Status': True})
 
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
 
 class PartnerState(APIView):
 
+    @extend_schema(request=PartnerStateRequestSerializer, responses=None)
     def put(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -231,6 +252,7 @@ class PartnerState(APIView):
 
 class PartnerOrders(APIView):
 
+    @extend_schema(request=None, responses=OrderSerializer)
     def get(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -253,6 +275,9 @@ class ProductInfoView(APIView):
     Класс для поиска товаров
     """
 
+    @extend_schema(request=None, responses=ProductInfoSerializer,
+                   parameters=[OpenApiParameter(name='shop_id', description='Filter by shop'),
+                               OpenApiParameter(name='category_id', description='Filter by category')])
     def get(self, request, *args, **kwargs):
         query = Q(shop__state=True)
         shop_id = request.query_params.get('shop_id')
@@ -281,6 +306,7 @@ class BasketView(APIView):
     """
 
     # получить корзину
+    @extend_schema(request=None, responses=OrderSerializer)
     def get(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -295,6 +321,7 @@ class BasketView(APIView):
         return Response(serializer.data)
 
     # добавить позиции в корзину
+    @extend_schema(request=BasketRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -324,6 +351,7 @@ class BasketView(APIView):
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
     # удалить товары из корзины
+    @extend_schema(request=BasketRequestSerializer, responses=None)
     def delete(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -344,6 +372,7 @@ class BasketView(APIView):
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
     # редактировать корзину
+    @extend_schema(request=BasketRequestSerializer, responses=None)
     def put(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -368,6 +397,7 @@ class BasketView(APIView):
 
 class OrderConfirmView(APIView):
 
+    @extend_schema(request=OrderConfirmRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -395,11 +425,12 @@ class OrderConfirmView(APIView):
                             return JsonResponse({'Status': False, 'Errors': 'Не правильно указаны аргументы'})
                         else:
                             # отправка email
-                            new_order_user.send(sender=self.__class__, user_id=request.user.id)
+
+                            new_order_user.delay(user_id=request.user.id)
+
                             ordered_items = OrderItem.objects.filter(order_id=order.first().id)
                             for ordered_item in ordered_items:
-                                new_order_admin.send(sender=self.__class__,
-                                                     user_id=ordered_item.product_info.shop.user.id)
+                                new_order_admin.delay(user_id=ordered_item.product_info.shop.user.id)
 
                             return JsonResponse({'Status': True, 'Номер вашего заказа': random_num})
 
@@ -409,20 +440,17 @@ class OrderConfirmView(APIView):
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
 
-class OrdersView(APIView):
+class OrdersViewSet (viewsets.ReadOnlyModelViewSet):
 
-    def get(self, request, *args, **kwargs):
-        if not request.user.is_authenticated:
-            return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
 
-        orders = Order.objects.filter(
-            ~Q(state='basket'), user_id=request.user.id).prefetch_related(
+    def get_queryset(self):
+        return Order.objects.filter(
+            ~Q(state='basket'), user_id=self.request.user.id).prefetch_related(
             'ordered_items__product_info__product__category',
             'ordered_items__product_info__product_parameters__parameter').select_related('contact').annotate(
             total_sum=Sum(F('ordered_items__quantity') * F('ordered_items__product_info__price'))).distinct()
-
-        serializer = OrderSerializer(orders, many=True)
-        return Response(serializer.data)
 
 
 class ContactsView(APIView):
@@ -430,6 +458,7 @@ class ContactsView(APIView):
     Класс для работы с контактами пользователя
     """
 
+    @extend_schema(request=None, responses=ContactSerializer)
     def get(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -438,6 +467,7 @@ class ContactsView(APIView):
         serializer = ContactSerializer(contacts, many=True)
         return Response(serializer.data)
 
+    @extend_schema(request=ContactsCreateRequestSerializer, responses=None)
     def post(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -453,6 +483,7 @@ class ContactsView(APIView):
         else:
             return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
+    @extend_schema(request=ContactsRemoveRequestSerializer, responses=None)
     def delete(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'}, status=403)
@@ -472,6 +503,7 @@ class ContactsView(APIView):
                 return JsonResponse({'Status': True, 'Удалено объектов': deleted_count})
         return JsonResponse({'Status': False, 'Errors': 'Не указаны все необходимые аргументы'})
 
+    @extend_schema(request=ContactSerializer, responses=None)
     def put(self, request, *args, **kwargs):
         if not request.user.is_authenticated:
             return JsonResponse({'Status': False, 'Error': 'Log in required'})
@@ -505,3 +537,7 @@ class ShopView(ListAPIView):
     """
     queryset = Shop.objects.filter(state=True)
     serializer_class = ShopSerializer
+
+
+class Home(TemplateView):
+    template_name = 'home.html'

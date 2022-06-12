@@ -85,3 +85,77 @@ class OrderSerializer(serializers.ModelSerializer):
         model = Order
         fields = ('id', 'ordered_items', 'state', 'dt', 'total_sum', 'number')
         read_only_fields = ('id',)
+
+
+# for schema
+
+class RegisterRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ('id', 'last_name', 'first_name', 'email', 'password', 'company', 'position')
+
+
+class ConfirmRequestSerializer(serializers.ModelSerializer):
+    token = serializers.CharField()
+
+    class Meta:
+        model = User
+        fields = ('id', 'email', 'token')
+
+
+class LoginRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ('id', 'email', 'password')
+
+
+class ResetPasswordTokenRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ('id', 'email')
+
+
+class ResetPasswordRequestSerializer(serializers.ModelSerializer):
+    token = serializers.CharField()
+    new_password = serializers.CharField()
+
+    class Meta:
+        model = User
+        fields = ('id', 'email', 'token', 'new_password')
+
+
+class PartnerUpdateRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Shop
+        fields = ('id', 'url')
+
+
+class PartnerStateRequestSerializer(serializers.ModelSerializer):
+    shop_id = serializers.CharField()
+
+    class Meta:
+        model = Shop
+        fields = ('id', 'shop_id', 'state')
+
+
+class BasketRequestSerializer(serializers.Serializer):
+    items = serializers.CharField()
+
+
+class OrderConfirmRequestSerializer(serializers.ModelSerializer):
+    id = serializers.CharField()
+    contact_id = serializers.CharField()
+
+    class Meta:
+        model = Order
+        fields = ('id', 'contact_id')
+
+
+class ContactsCreateRequestSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Contact
+        fields = ('id', 'city', 'street', 'phone')
+
+
+class ContactsRemoveRequestSerializer(serializers.Serializer):
+    items = serializers.CharField()

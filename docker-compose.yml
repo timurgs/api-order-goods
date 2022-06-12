@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  backend:
+    image: my_python
+    ports:
+      - '8001:8000'
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - celery
+  celery:
+    image: my_python
+    command: celery -A orders worker -l info -P gevent
+    env_file:
+      - .env
+    depends_on:
+      - redis
+  redis:
+    image: redis
+    ports:
+      - '6379:6379'
+    env_file:
+      - .env
+  postgres:
+    image: postgres
+    ports:
+      - '5432:5432'
+    env_file:
+      - .env
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+  migration:
+    image: my_python
+    command: python /app/manage.py migrate --noinput
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  pg-data:
